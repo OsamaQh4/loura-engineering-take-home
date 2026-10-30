@@ -25,8 +25,6 @@ There are no API keys. The service uses a fake model (`app/llm.py`) that labels 
 
 It also sometimes "falls for" prompt injection. You can tune it with `FAKE_LLM_FAILURE_RATE` and `FAKE_LLM_SEED`. All settings are in `app/config.py`.
 
-> **Note on sample data:** I wrote `samples/tickets.json` myself because the appendix did not reach me. It covers each category, an Arabic ticket, a near-empty ticket, a ticket that mixes two categories, a ticket with JSON in its body, and a prompt-injection ticket (`T-1007`). Swap in the official samples by replacing that file; the loader and tests read it as-is.
-
 ## API
 
 | Method & path | Result |
