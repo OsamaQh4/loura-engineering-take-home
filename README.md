@@ -25,6 +25,8 @@ There are no API keys. The service uses a fake model (`app/llm.py`) that labels 
 
 It also sometimes "falls for" prompt injection. You can tune it with `FAKE_LLM_FAILURE_RATE` and `FAKE_LLM_SEED`. All settings are in `app/config.py`.
 
+The sample tickets are in `samples/tickets.json`. `scripts/load_samples.py` posts them to the running service and is safe to re-run. A test also loads every sample through a deliberately unreliable fake model and checks that each ticket ends in a valid state.
+
 ## API
 
 | Method & path | Result |
@@ -36,6 +38,21 @@ It also sometimes "falls for" prompt injection. You can tune it with `FAKE_LLM_F
 Every error has the same shape: `{"error": {"code", "message", "details?"}}`.
 
 A ticket's `status` is `pending`, then either `classified` (with `classification`) or `failed` (with `last_error`). `attempts` counts the model calls made.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "pending (queued)" as queued
+    state "pending (leased, in flight)" as leased
+    [*] --> queued: POST /tickets
+    queued --> leased: claim<br/>attempts += 1
+    leased --> classified: valid output
+    leased --> queued: retry after backoff<br/>(attempts < max)
+    leased --> failed: attempts = max
+    leased --> queued: shutdown or crash
+    classified --> [*]
+    failed --> [*]
+```
 
 ## Layout
 
@@ -67,6 +84,21 @@ I chose this over Celery, Redis or a separate queue because it needs no extra in
 - **Clean shutdown** (the stretch item I picked): workers stop claiming and in-flight calls get `SHUTDOWN_GRACE_S` to finish. Calls still running after that are cancelled, and each hands its ticket straight back to the queue with its attempt refunded.
 - **Crash or `kill -9`:** the lease expires after `LEASE_S` (60s) and any worker reclaims the ticket.
 - **No double-processing:** if a slow "dead" worker comes back after its ticket was reclaimed, its write is fenced out and discarded. The worst case is one wasted model call. A result can never be stored twice or overwrite a newer one.
+```mermaid
+sequenceDiagram
+    participant W1 as Worker 1 (slow)
+    participant DB as SQLite
+    participant W2 as Worker 2
+    W1->>DB: claim T-1 (token A, lease until t+60s)
+    Note over W1: model call hangs / process stalls
+    Note over DB: t+60s, lease expired
+    W2->>DB: claim T-1 (token B, attempts = 2)
+    W2->>DB: complete WHERE token = B
+    DB-->>W2: 1 row updated, classified
+    W1->>DB: complete WHERE token = A
+    DB-->>W1: 0 rows updated, result discarded
+```
+
 - **Crash loops:** a ticket that crashes the process every time still counts attempts, because they are incremented at claim time. It goes to `failed` instead of looping forever.
 
 **Retry policy.** Each call has a timeout (`LLM_TIMEOUT_S`, 10s). These all count as a failed attempt:
@@ -97,7 +129,7 @@ A failed attempt is retried with exponential backoff and jitter (1s, 2s, … cap
 - **Failed is final.** There is no endpoint to re-queue failed tickets or re-classify after a prompt change. I picked graceful shutdown as the stretch item instead.
 - **No `LEASE_S` > `LLM_TIMEOUT_S` check at startup**, no authentication, no rate limiting on ingest, and no request size limit beyond field lengths.
 - **Retries use the identical prompt.** A deterministic model at temperature 0 could fail the same way three times.
-- **The fake model's labels are keyword rules,** so they say nothing about classification quality.
+- **The fake model's labels are English keyword rules,** so they say nothing about classification quality. For example, the Arabic login ticket `T-1009` comes out as `other/low`.
 
 ## With more time
 
